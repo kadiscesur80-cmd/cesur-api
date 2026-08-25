@@ -24,8 +24,8 @@ import uuid
 # ══════════════════════════════════════════════════════════
 # CESUR LICENSE API
 # ══════════════════════════════════════════════════════════
-CESUR_API_URL  = "https://cesur-api.onrender.com"
-CESUR_LICENSE_KEY = "CESUR-YOUR-KEY-HERE"
+CESUR_API_URL = "https://cesur-api.onrender.com"
+_CESUR_KEY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cesur_key")
 
 def _cesur_hwid():
     try:
@@ -38,48 +38,119 @@ def _cesur_hwid():
     except Exception:
         return hashlib.sha256(uuid.getnode().to_bytes(6,'big')).hexdigest()[:32].upper()
 
+def _cesur_save_key(key):
+    try:
+        with open(_CESUR_KEY_FILE, "w") as f: f.write(key)
+    except: pass
+
+def _cesur_load_key():
+    try:
+        if os.path.exists(_CESUR_KEY_FILE):
+            with open(_CESUR_KEY_FILE, "r") as f: return f.read().strip()
+    except: pass
+    return ""
+
+def _cesur_gui():
+    import tkinter as tk
+    from tkinter import font as tkfont
+
+    result = {"key": None}
+
+    root = tk.Tk()
+    root.title("Cesur - Lisans")
+    root.configure(bg="#1a1a2e")
+    root.resizable(False, False)
+    root.attributes("-topmost", True)
+
+    w, h = 420, 320
+    x = (root.winfo_screenwidth() // 2) - (w // 2)
+    y = (root.winfo_screenheight() // 2) - (h // 2)
+    root.geometry(f"{w}x{h}+{x}+{y}")
+
+    title_font = tkfont.Font(family="Segoe UI", size=18, weight="bold")
+    label_font = tkfont.Font(family="Segoe UI", size=10)
+    entry_font = tkfont.Font(family="Consolas", size=12)
+    btn_font = tkfont.Font(family="Segoe UI", size=11, weight="bold")
+    status_font = tkfont.Font(family="Segoe UI", size=9)
+
+    tk.Label(root, text="CESUR", font=title_font, bg="#1a1a2e", fg="#e94560").pack(pady=(25, 5))
+    tk.Label(root, text="Lisans Anahtarinizi Girin", font=label_font, bg="#1a1a2e", fg="#aaa").pack()
+
+    entry_var = tk.StringVar()
+    entry_var.set(_cesur_load_key())
+    entry = tk.Entry(root, textvariable=entry_var, font=entry_font, width=30,
+                     bg="#16213e", fg="#e94560", insertbackground="#e94560",
+                     relief="flat", justify="center")
+    entry.pack(pady=(20, 5), ipady=6)
+    entry.focus_set()
+
+    status_var = tk.StringVar(value="")
+    status_label = tk.Label(root, textvariable=status_var, font=status_font, bg="#1a1a2e", fg="#aaa")
+
+    def on_verify():
+        key = entry_var.get().strip()
+        if not key:
+            status_var.set("Key bos olamaz!")
+            status_label.config(fg="#e94560")
+            return
+        status_var.set("Dogrulanıyor...")
+        status_label.config(fg="#f5a623")
+        root.update()
+
+        hwid = _cesur_hwid()
+        for attempt in range(3):
+            try:
+                r = requests.post(CESUR_API_URL.rstrip("/") + "/api/validate",
+                                  json={"key": key, "hwid": hwid}, timeout=10)
+                d = r.json()
+                if d.get("valid"):
+                    msg = d.get("message", "")
+                    days = d.get("remaining_days", "?")
+                    txt = f"Gecerli! Kalan: {days} gun"
+                    if msg: txt += f" | {msg}"
+                    status_var.set(txt)
+                    status_label.config(fg="#4ecdc4")
+                    _cesur_save_key(key)
+                    result["key"] = key
+                    root.after(800, root.destroy)
+                    return
+                else:
+                    status_var.set(d.get("reason", "Gecersiz key."))
+                    status_label.config(fg="#e94560")
+                    return
+            except requests.exceptions.ConnectionError:
+                if attempt < 2:
+                    status_var.set("Sunucuya baglanamiyor, tekrar deneniyor...")
+                    status_label.config(fg="#f5a623")
+                    root.update()
+                    time.sleep(2)
+                    continue
+                status_var.set("Internet baglantinizi kontrol edin.")
+                status_label.config(fg="#e94560")
+                return
+            except Exception as e:
+                status_var.set(f"Hata: {e}")
+                status_label.config(fg="#e94560")
+                return
+
+    btn = tk.Button(root, text="GIRIŞ YAP", font=btn_font, command=on_verify,
+                    bg="#e94560", fg="white", activebackground="#c73650",
+                    activeforeground="white", relief="flat", cursor="hand2")
+    btn.pack(pady=(15, 5), ipadx=30, ipady=4)
+
+    tk.Label(root, text="Key'iniz yoksa yetkiliyle iletisime gecin",
+             font=("Segoe UI", 8), bg="#1a1a2e", fg="#555").pack(side="bottom", pady=(0,10))
+
+    root.bind("<Return>", lambda e: on_verify())
+    root.protocol("WM_DELETE_WINDOW", lambda: (sys.exit(0)))
+    root.mainloop()
+    return result["key"]
+
 def _cesur_validate():
-    print("=" * 50)
-    print("  Cesur - Lisans Dogrulama")
-    print("=" * 50)
-    print()
-    print("  Lisans dogrulanıyor...")
-    print()
-    hwid = _cesur_hwid()
-    for attempt in range(3):
-        try:
-            r = requests.post(CESUR_API_URL.rstrip("/") + "/api/validate",
-                              json={"key": CESUR_LICENSE_KEY, "hwid": hwid}, timeout=10)
-            d = r.json()
-            if d.get("valid"):
-                msg = d.get("message", "")
-                days = d.get("remaining_days", "?")
-                info = f"Lisans gecerli (kalan: {days} gun)"
-                if msg: info += f"\n\n{msg}"
-                print(f"  ✓ {info}")
-                print()
-                time.sleep(1)
-                return True
-            else:
-                print(f"  ✗ {d.get('reason', 'Lisans gecersiz.')}")
-                print()
-                print("  Hile kapatiliyor.")
-                print("=" * 50)
-                time.sleep(3)
-                sys.exit(1)
-        except requests.exceptions.ConnectionError:
-            if attempt < 2:
-                print("  Sunucuya baglanamiyor, tekrar deneniyor...")
-                time.sleep(2)
-                continue
-            print("  Sunucuya baglanamiyor. Internet baglantinizi kontrol edin.")
-            time.sleep(3)
-            sys.exit(1)
-        except Exception as e:
-            print(f"  Dogrulama hatasi: {e}")
-            time.sleep(3)
-            sys.exit(1)
-    sys.exit(1)
+    key = _cesur_gui()
+    if not key:
+        sys.exit(1)
+    return True
 
 # ★ Streamproof API
 _user32_dll = ctypes.WinDLL('user32', use_last_error=True)
