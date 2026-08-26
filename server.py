@@ -83,11 +83,12 @@ def validate_license(data: LicenseCheck):
     if datetime.now() > exp:
         return {"valid": False, "reason": f"Lisans suresi dolmus ({exp.strftime('%d.%m.%Y')})."}
 
-    if k.get("hwid_locked", True):
-        if k.get("hwid") and k["hwid"] != data.hwid:
-            return {"valid": False, "reason": "Bu lisans baska bir makineye kilitli."}
-        if not k.get("hwid"):
-            k["hwid"] = data.hwid
+    # HWID kilidi simdilik devre disi — sadece sure bazli dogrulama
+    # if k.get("hwid_locked", True):
+    #     if k.get("hwid") and k["hwid"] != data.hwid:
+    #         return {"valid": False, "reason": "Bu lisans baska bir makineye kilitli."}
+    #     if not k.get("hwid"):
+    #         k["hwid"] = data.hwid
 
     k["last_validated"] = datetime.now().isoformat()
     save_db(db)
