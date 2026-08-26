@@ -1,8 +1,12 @@
 """
-Cesur License API - FastAPI sunucusu
+Cesur License API - FastAPI sunucusu (v2)
 Render.com ucretsiz planinda calisir.
+- HWID kilitleme (ilk kullanimda baglanir)
+- Kalan sure takibi (saat bazinda)
+- Son dogrulama zamanini kaydeder
+- Key yenileme endpointi
 """
-import os, json, time, hashlib, hmac, secrets
+import os, json, time, hmac, secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Header
@@ -19,7 +23,10 @@ DB_FILE = Path(__file__).parent / "database.json"
 # ─── Database ──────────────────────────────────────────────
 def load_db():
     if DB_FILE.exists():
-        return json.loads(DB_FILE.read_text(encoding="utf-8"))
+        try:
+            return json.loads(DB_FILE.read_text(encoding="utf-8"))
+        except:
+            pass
     return {"keys": {}, "messages": [], "revoked": [], "banned_hwids": []}
 
 def save_db(db):
@@ -27,11 +34,9 @@ def save_db(db):
 
 # ─── Key helpers ───────────────────────────────────────────
 def generate_key(days: int) -> str:
-    """Ornek: CESUR-A1B2-C3D4-7"""
     seg = lambda: secrets.token_hex(2).upper()
-    exp_part = secrets.token_hex(1).upper()
-    raw = f"{seg()}-{seg()}-{seg()}-{exp_part}"
-    return f"CESUR-{raw}"
+    last = secrets.token_hex(1).upper()
+    return f"CESUR-{seg()}-{seg()}-{seg()}-{last}"
 
 def verify_admin(token: str):
     if not hmac.compare_digest(token, ADMIN_TOKEN):
@@ -53,44 +58,44 @@ class MessageSet(BaseModel):
 class KeyAction(BaseModel):
     key: str
 
+class KeyRenew(BaseModel):
+    key: str
+    days: int = 7
+
 # ─── PUBLIC: License dogrulama ────────────────────────────
 @app.post("/api/validate")
 def validate_license(data: LicenseCheck):
     db = load_db()
     key = data.key.upper().strip()
 
-    # Ban kontrolu
     if data.hwid in db.get("banned_hwids", []):
         return {"valid": False, "reason": "Bu makine engellenmis."}
 
-    # Key var mi?
     if key not in db["keys"]:
         return {"valid": False, "reason": "Gecersiz lisans key."}
 
     k = db["keys"][key]
 
-    # Iptal edilmis mi?
     if key in db.get("revoked", []):
         return {"valid": False, "reason": "Lisans iptal edilmis."}
 
-    # Suresi dolmus mu?
     exp = datetime.fromisoformat(k["expires"])
     if datetime.now() > exp:
         return {"valid": False, "reason": f"Lisans suresi dolmus ({exp.strftime('%d.%m.%Y')})."}
 
-    # HWID kontrolu
     if k.get("hwid_locked", True):
         if k.get("hwid") and k["hwid"] != data.hwid:
             return {"valid": False, "reason": "Bu lisans baska bir makineye kilitli."}
         if not k.get("hwid"):
             k["hwid"] = data.hwid
-            save_db(db)
 
-    # Kalan sure
-    remaining = (exp - datetime.now()).total_seconds()
-    remaining_days = int(remaining / 86400)
+    k["last_validated"] = datetime.now().isoformat()
+    save_db(db)
 
-    # Mesaj var mi?
+    remaining_sec = (exp - datetime.now()).total_seconds()
+    remaining_hours = int(remaining_sec / 3600)
+    remaining_days = remaining_hours / 24.0
+
     msg = ""
     if db.get("messages"):
         msg = db["messages"][-1]["text"]
@@ -98,7 +103,8 @@ def validate_license(data: LicenseCheck):
     return {
         "valid": True,
         "expires": exp.isoformat(),
-        "remaining_days": remaining_days,
+        "remaining_hours": remaining_hours,
+        "remaining_days": round(remaining_days, 1),
         "message": msg,
     }
 
@@ -116,9 +122,26 @@ def admin_create_key(data: KeyCreate, x_admin_token: str = Header(...)):
         "expires": expires,
         "hwid_locked": data.hwid_locked,
         "hwid": None,
+        "last_validated": None,
     }
     save_db(db)
     return {"key": key, "expires": expires, "days": data.days}
+
+@app.post("/api/admin/renew")
+def admin_renew_key(data: KeyRenew, x_admin_token: str = Header(...)):
+    verify_admin(x_admin_token)
+    db = load_db()
+    key = data.key.upper().strip()
+    if key not in db["keys"]:
+        raise HTTPException(404, "Key bulunamadi.")
+    k = db["keys"][key]
+    exp = datetime.fromisoformat(k["expires"])
+    base = max(datetime.now(), exp)
+    k["expires"] = (base + timedelta(days=data.days)).isoformat()
+    k["revoked_date"] = None
+    db["revoked"] = [r for r in db.get("revoked", []) if r != key]
+    save_db(db)
+    return {"ok": True, "key": key, "new_expires": k["expires"], "added_days": data.days}
 
 @app.post("/api/admin/revoke")
 def admin_revoke_key(data: KeyAction, x_admin_token: str = Header(...)):
@@ -148,13 +171,17 @@ def admin_list_keys(x_admin_token: str = Header(...)):
     result = []
     for key, info in db["keys"].items():
         exp = datetime.fromisoformat(info["expires"])
+        remaining = max(0, int((exp - datetime.now()).total_seconds() / 3600))
         result.append({
             "key": key,
+            "created": info.get("created", "?"),
             "expires": exp.strftime("%d.%m.%Y %H:%M"),
-            "hwid": info.get("hwid", "Yok"),
+            "remaining_hours": remaining,
+            "hwid": info.get("hwid", "Yok") or "Yok",
             "hwid_locked": info.get("hwid_locked", True),
             "revoked": key in db.get("revoked", []),
             "expired": datetime.now() > exp,
+            "last_validated": info.get("last_validated", "Hic"),
         })
     return {"keys": result, "total": len(result)}
 
@@ -205,7 +232,7 @@ def admin_clear_messages(x_admin_token: str = Header(...)):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "api": "Cesur License API", "version": "1.0"}
+    return {"status": "ok", "api": "Cesur License API", "version": "2.0"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
